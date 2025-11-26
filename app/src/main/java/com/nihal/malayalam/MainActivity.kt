@@ -13,7 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.textfield.TextInputEditText
 
-// IMPORTS
+// LITERT IMPORTS
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Conversation
@@ -48,12 +48,7 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
-                // Grants permission to read this specific URI
-                contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-                loadAudioFile(uri)
+                processAudioFile(uri)
             }
         }
     }
@@ -73,12 +68,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnPickAudio.setOnClickListener {
-            // FIX: Use */* to show ALL files, not just strictly defined wavs
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = "*/*"
-                // Optional: extra mime types if needed
-                // putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/wav", "audio/x-wav", "application/octet-stream"))
+                type = "*/*" // Allow ALL audio types (Opus, MP3, M4A)
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/*", "application/ogg"))
             }
             pickAudioLauncher.launch(intent)
         }
@@ -108,7 +101,7 @@ class MainActivity : AppCompatActivity() {
 
                 val engineConfig = EngineConfig(
                     modelPath = modelFile.absolutePath,
-                    backend = Backend.CPU, // Keep on CPU for safety
+                    backend = Backend.CPU,
                     audioBackend = Backend.CPU,
                     cacheDir = appDir?.absolutePath,
                     maxNumTokens = 1024
@@ -116,6 +109,7 @@ class MainActivity : AppCompatActivity() {
 
                 engine = Engine(engineConfig)
                 engine?.initialize()
+
                 conversation = engine?.createConversation(ConversationConfig())
 
                 withContext(Dispatchers.Main) {
@@ -133,22 +127,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadAudioFile(uri: Uri) {
+    // NEW FUNCTION: Handles copying AND converting
+    private fun processAudioFile(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                contentResolver.openInputStream(uri)?.use { inputStream ->
-                    val bytes = inputStream.readBytes()
-                    selectedAudioBytes = bytes
-                    withContext(Dispatchers.Main) {
-                        tvSelectedFile.text = "Loaded: ${bytes.size} bytes"
-                        tvResult.text = "Audio ready. Click Run."
-                        btnRun.isEnabled = true
-                    }
+                withContext(Dispatchers.Main) {
+                    tvResult.text = "Converting audio to 16kHz WAV..."
+                    btnRun.isEnabled = false
+                }
+
+                // 1. Copy the user's file (Opus, MP3, etc) to a temp file
+                val rawFile = AudioHelper.copyUriToCache(this@MainActivity, uri)
+                if (rawFile == null) {
+                    throw Exception("Failed to copy audio file")
+                }
+
+                // 2. Convert it to the format Gemma needs (16kHz Mono WAV)
+                val convertedFile = AudioHelper.convertTo16BitWav(rawFile, this@MainActivity)
+
+                // Cleanup the raw input file to save space
+                rawFile.delete()
+
+                if (convertedFile == null || !convertedFile.exists()) {
+                    throw Exception("FFmpeg conversion failed")
+                }
+
+                // 3. Read the bytes of the CLEAN WAV file
+                val bytes = convertedFile.readBytes()
+                selectedAudioBytes = bytes
+
+                // Cleanup the wav file (bytes are now in memory)
+                convertedFile.delete()
+
+                withContext(Dispatchers.Main) {
+                    tvSelectedFile.text = "Audio Ready (${bytes.size} bytes)"
+                    tvResult.text = "Audio converted & ready."
+                    btnRun.isEnabled = true
                 }
             } catch (e: Exception) {
-                Log.e("AudioLoad", "Failed", e)
+                Log.e("AudioProcess", "Error", e)
                 withContext(Dispatchers.Main) {
-                    tvResult.text = "Failed to read audio: ${e.message}"
+                    tvResult.text = "Error processing audio: ${e.message}"
                 }
             }
         }
@@ -165,10 +184,12 @@ class MainActivity : AppCompatActivity() {
             try {
                 val contentList = mutableListOf<Content>()
 
+                // Audio First
                 selectedAudioBytes?.let { audio ->
                     contentList.add(Content.AudioBytes(audio))
                 }
 
+                // Text Second
                 if (promptText.isNotEmpty()) {
                     contentList.add(Content.Text(promptText))
                 }
@@ -182,10 +203,10 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread { tvResult.text = fullResponse }
                     }
                     override fun onDone() {
-                        Log.d("LiteRT", "Done")
+                        Log.d("LiteRT", "Inference Done")
                     }
                     override fun onError(e: Throwable) {
-                        Log.e("LiteRT", "Error", e)
+                        Log.e("LiteRT", "Inference Error", e)
                         runOnUiThread { tvResult.text = "Error: ${e.message}" }
                     }
                 })

@@ -13,6 +13,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        // Vital for LLMs: Filter to 64-bit architectures only
         ndk {
             abiFilters.add("arm64-v8a")
         }
@@ -36,10 +38,16 @@ android {
     }
 }
 
+// --- REMOVED THE 'repositories' BLOCK HERE TO FIX THE ERROR ---
+
 dependencies {
     // LiteRT-LM SDK
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.0.0-alpha06")
 
+    // REMOVED: implementation("com.arthenica:ffmpeg-kit-full:4.5.1")
+    // We will use Native Android APIs instead.
+
+    // Standard Android UI
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")

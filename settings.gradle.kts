@@ -10,7 +10,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Add jitpack just in case dependencies require it transitively
+        maven { url = uri("https://jitpack.io") }
     }
 }
+
 rootProject.name = "GemmaMalayalam"
 include(":app")
