@@ -1,8 +1,12 @@
 package com.nihal.malayalam
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaRecorder
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -10,10 +14,11 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.textfield.TextInputEditText
 
-// LITERT IMPORTS
+// LiteRT IMPORTS
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Conversation
@@ -28,6 +33,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
@@ -37,9 +44,15 @@ class MainActivity : AppCompatActivity() {
     private var conversation: Conversation? = null
     private var selectedAudioBytes: ByteArray? = null
 
+    // Recording variables
+    private var mediaRecorder: MediaRecorder? = null
+    private var isRecording = false
+    private var tempRecordFile: File? = null
+
     private lateinit var tvResult: TextView
     private lateinit var tvSelectedFile: TextView
     private lateinit var btnPickAudio: Button
+    private lateinit var btnRecordAudio: Button
     private lateinit var btnRun: Button
     private lateinit var etPrompt: TextInputEditText
 
@@ -48,10 +61,23 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
-                processAudioFile(uri)
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                processAudioUri(uri)
             }
         }
     }
+
+    private val requestPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
+            if (isGranted) {
+                toggleRecording()
+            } else {
+                Toast.makeText(this, "Microphone permission required", Toast.LENGTH_SHORT).show()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +86,7 @@ class MainActivity : AppCompatActivity() {
         tvResult = findViewById(R.id.tvResult)
         tvSelectedFile = findViewById(R.id.tvSelectedFile)
         btnPickAudio = findViewById(R.id.btnPickAudio)
+        btnRecordAudio = findViewById(R.id.btnRecordAudio)
         btnRun = findViewById(R.id.btnRun)
         etPrompt = findViewById(R.id.etPrompt)
 
@@ -70,10 +97,19 @@ class MainActivity : AppCompatActivity() {
         btnPickAudio.setOnClickListener {
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = "*/*" // Allow ALL audio types (Opus, MP3, M4A)
+                type = "*/*"
                 putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/*", "application/ogg"))
             }
             pickAudioLauncher.launch(intent)
+        }
+
+        btnRecordAudio.setOnClickListener {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+                toggleRecording()
+            } else {
+                requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
 
         btnRun.setOnClickListener {
@@ -99,6 +135,7 @@ class MainActivity : AppCompatActivity() {
                     return@launch
                 }
 
+                // Configure Engine (CPU for Safety)
                 val engineConfig = EngineConfig(
                     modelPath = modelFile.absolutePath,
                     backend = Backend.CPU,
@@ -109,13 +146,13 @@ class MainActivity : AppCompatActivity() {
 
                 engine = Engine(engineConfig)
                 engine?.initialize()
-
                 conversation = engine?.createConversation(ConversationConfig())
 
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, "Ready!", Toast.LENGTH_SHORT).show()
-                    tvResult.text = "Engine Ready. Load Audio."
+                    tvResult.text = "Engine Ready. Pick or Record Audio."
                     btnPickAudio.isEnabled = true
+                    btnRecordAudio.isEnabled = true
                 }
 
             } catch (e: Exception) {
@@ -127,8 +164,70 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // NEW FUNCTION: Handles copying AND converting
-    private fun processAudioFile(uri: Uri) {
+    private fun toggleRecording() {
+        if (isRecording) {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    private fun startRecording() {
+        try {
+            tempRecordFile = File(cacheDir, "mic_record_${UUID.randomUUID()}.m4a")
+
+            // Use the correct constructor based on Android version
+            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(this)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }
+
+            mediaRecorder = recorder.apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setOutputFile(tempRecordFile?.absolutePath)
+                prepare()
+                start()
+            }
+
+            isRecording = true
+            btnRecordAudio.text = "Stop Recording"
+            tvSelectedFile.text = "Recording..."
+            tvResult.text = "Recording..."
+            btnPickAudio.isEnabled = false
+            btnRun.isEnabled = false
+
+        } catch (e: IOException) {
+            Log.e("AudioRecord", "Start failed", e)
+        }
+    }
+
+    private fun stopRecording() {
+        try {
+            mediaRecorder?.apply {
+                stop()
+                release()
+            }
+            mediaRecorder = null
+            isRecording = false
+            btnRecordAudio.text = "Record Audio"
+            btnPickAudio.isEnabled = true
+
+            // Convert the recorded file
+            tempRecordFile?.let { file ->
+                processRecordedFile(file)
+            }
+
+        } catch (e: Exception) {
+            Log.e("AudioRecord", "Stop failed", e)
+        }
+    }
+
+    // Process file from File Picker
+    private fun processAudioUri(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 withContext(Dispatchers.Main) {
@@ -136,39 +235,58 @@ class MainActivity : AppCompatActivity() {
                     btnRun.isEnabled = false
                 }
 
-                // 1. Copy the user's file (Opus, MP3, etc) to a temp file
-                val rawFile = AudioHelper.copyUriToCache(this@MainActivity, uri)
-                if (rawFile == null) {
-                    throw Exception("Failed to copy audio file")
-                }
-
-                // 2. Convert it to the format Gemma needs (16kHz Mono WAV)
+                val rawFile = AudioHelper.copyUriToCache(this@MainActivity, uri) ?: throw Exception("Copy failed")
                 val convertedFile = AudioHelper.convertTo16BitWav(rawFile, this@MainActivity)
-
-                // Cleanup the raw input file to save space
                 rawFile.delete()
 
                 if (convertedFile == null || !convertedFile.exists()) {
-                    throw Exception("FFmpeg conversion failed")
+                    throw Exception("Conversion failed")
                 }
 
-                // 3. Read the bytes of the CLEAN WAV file
                 val bytes = convertedFile.readBytes()
                 selectedAudioBytes = bytes
-
-                // Cleanup the wav file (bytes are now in memory)
                 convertedFile.delete()
 
                 withContext(Dispatchers.Main) {
-                    tvSelectedFile.text = "Audio Ready (${bytes.size} bytes)"
-                    tvResult.text = "Audio converted & ready."
+                    tvSelectedFile.text = "File Loaded (${bytes.size} bytes)"
+                    tvResult.text = "Audio ready. Click Run."
                     btnRun.isEnabled = true
                 }
             } catch (e: Exception) {
                 Log.e("AudioProcess", "Error", e)
+                withContext(Dispatchers.Main) { tvResult.text = "Error: ${e.message}" }
+            }
+        }
+    }
+
+    // Process file from Mic Recorder
+    private fun processRecordedFile(file: File) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
                 withContext(Dispatchers.Main) {
-                    tvResult.text = "Error processing audio: ${e.message}"
+                    tvResult.text = "Processing recording..."
                 }
+
+                // Convert the M4A recording to 16kHz WAV
+                val convertedFile = AudioHelper.convertTo16BitWav(file, this@MainActivity)
+                file.delete() // Clean up raw recording
+
+                if (convertedFile == null || !convertedFile.exists()) {
+                    throw Exception("Conversion failed")
+                }
+
+                val bytes = convertedFile.readBytes()
+                selectedAudioBytes = bytes
+                convertedFile.delete()
+
+                withContext(Dispatchers.Main) {
+                    tvSelectedFile.text = "Recording Loaded (${bytes.size} bytes)"
+                    tvResult.text = "Recording ready. Click Run."
+                    btnRun.isEnabled = true
+                }
+            } catch (e: Exception) {
+                Log.e("AudioProcess", "Error", e)
+                withContext(Dispatchers.Main) { tvResult.text = "Error: ${e.message}" }
             }
         }
     }
@@ -184,12 +302,10 @@ class MainActivity : AppCompatActivity() {
             try {
                 val contentList = mutableListOf<Content>()
 
-                // Audio First
                 selectedAudioBytes?.let { audio ->
                     contentList.add(Content.AudioBytes(audio))
                 }
 
-                // Text Second
                 if (promptText.isNotEmpty()) {
                     contentList.add(Content.Text(promptText))
                 }
@@ -203,10 +319,10 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread { tvResult.text = fullResponse }
                     }
                     override fun onDone() {
-                        Log.d("LiteRT", "Inference Done")
+                        Log.d("LiteRT", "Done")
                     }
                     override fun onError(e: Throwable) {
-                        Log.e("LiteRT", "Inference Error", e)
+                        Log.e("LiteRT", "Error", e)
                         runOnUiThread { tvResult.text = "Error: ${e.message}" }
                     }
                 })
